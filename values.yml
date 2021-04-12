@@ -1,0 +1,3 @@
+repoPath: droitfintech/jfrog-microservice2-pipeline
+gitProvider: githubrepos
+artifactory: artifactory

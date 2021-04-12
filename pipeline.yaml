@@ -1,0 +1,123 @@
+# This config file is templatized so that it can be easily customized. Values can be provided with a values.yml at the root of this repository
+template: true   # required for local templates
+valuesFilePath: ./values.yml
+resources:
+  - name: service2_repo
+    type: GitRepo
+    configuration:
+      path: {{ .Values.repoPath }}
+      branches:
+        include: ^{{gitBranch}}$ 
+      gitProvider: {{ .Values.gitProvider }}
+      buildOn:
+        commit:            true
+        pullRequestCreate: true
+        #pullRequestClose:  <Boolean>
+        #releaseCreate:     <Boolean>
+        #tagCreate:         <Boolean>
+      cancelPendingRunsOn:
+        newCommit:         true
+        pullRequestUpdate: true
+  - name: service2_buildinfo
+    type: BuildInfo
+    configuration:
+      sourceArtifactory: {{ .Values.artifactory }}
+pipelines:
+  - name: jfrog_demo_pipeline
+    configuration:
+        runtime:      
+          type: image
+          image:
+            custom:
+              name: 378307887993.dkr.ecr.us-east-1.amazonaws.com/droit-base-image-ubuntu
+              tag: 20.04.6
+              options: "-e HOME=/root"
+              registry: droit_nonprod # if custom image is private, an integration is required for authentication
+              region:  us-east-1  # required if registry is AWS. e.g. us-east-1
+    steps:
+      - name: lein_build
+        type: Bash
+        configuration:
+          affinityGroup: together
+          inputResources:
+            - name: service2_repo
+          integrations:
+            - name: notifySlack
+            - name: repo_credentials
+            - name: {{ .Values.artifactory }}
+        execution:
+          onStart:
+            - update_commit_status service2_repo --message "starting..." --context "$pipeline_name:$run_number"
+            - send_notification notifySlack --text "Starting $pipeline_name:$run_number" --recipient "#jfrog-pipeline-notification"
+          onExecute:
+            -  cd  $res_service2_repo_resourcePath
+            -  export LEIN_PASSWORD=$int_repo_credentials_password
+            -  export LEIN_USERNAME=$int_repo_credentials_username
+            -  export JFROG_CLI_BUILD_NAME=$pipeline_name && export JFROG_CLI_BUILD_NUMBER=$run_number
+            -  lein do clean, install
+            - /var/opt/jfrog/pipelines/jfrog/jfrog rt use artifactory
+            - pushd /var/opt/jfrog/pipelines/data/jfrog_demo_pipeline/runs/$run_id/steps/$step_name/$step_id/.
+            - add_run_variables buildStepName='lein_build'
+            - add_run_variables lein_build_payloadType=mvn
+            - add_run_variables lein_build_buildNumber=$run_number
+            - add_run_variables buildName=service2_repo
+            - add_run_variables buildNumber=$run_number
+            - add_run_variables lein_build_buildName='service2_repo'
+            - add_run_variables lein_build_isPromoted=false
+            - popd
+            - /var/opt/jfrog/pipelines/jfrog/jfrog rt build-collect-env "service2_repo" "$run_number"
+            - add_run_files /tmp/jfrog/. jfrog
+            - /var/opt/jfrog/pipelines/jfrog/jfrog rt upload  /var/opt/jfrog/pipelines/data/jfrog_demo_pipeline/runs/$run_id/steps/$step_name/$step_id/dependencyState/resources/service2_repo/target/*.jar example-repo-local --build-name service2_repo --build-number $run_number --module "service2_repo"
+            - /var/opt/jfrog/pipelines/jfrog/jfrog rt upload  /var/opt/jfrog/pipelines/data/jfrog_demo_pipeline/runs/$run_id/steps/$step_name/$step_id/dependencyState/resources/service2_repo/pom.xml example-repo-local --build-name service2_repo --build-number $run_number --module "service2_repo"
+            - /var/opt/jfrog/pipelines/jfrog/jfrog rt bad service2_repo $run_number "~/.m2/repository/"
+            - /var/opt/jfrog/pipelines/jfrog/jfrog rt build-publish service2_repo $run_number 
+          onFailure:
+            - update_commit_status service2_repo --message "Failed!" --context "$pipeline_name:$run_number"
+            - send_notification notifySlack --text "Failed $pipeline_name:$run_number" --recipient "#jfrog-pipeline-notification"
+      - name: xray_scan
+        type: Bash
+        configuration:
+          inputSteps:
+            - name: lein_build
+          affinityGroup: together
+          inputResources:
+            - name: service2_repo
+          integrations:
+            - name: notifySlack
+            - name: repo_credentials
+            - name: {{ .Values.artifactory }}
+        execution:
+          onExecute:
+            - /var/opt/jfrog/pipelines/jfrog/jfrog rt use artifactory
+            - /var/opt/jfrog/pipelines/jfrog/jfrog rt build-scan --insecure-tls=false --fail=true service2_repo $run_number
+          onFailure:
+            - update_commit_status service2_repo --message "Failed!" --context "$pipeline_name:$run_number"
+            - send_notification notifySlack --text "Failed $pipeline_name:$run_number" --recipient "#jfrog-pipeline-notification"
+      - name: lein_deploy
+        type: Bash
+        configuration:
+          inputSteps:
+            - name: xray_scan
+          affinityGroup: together
+          inputResources:
+            - name: service2_repo
+          integrations:
+            - name: notifySlack
+            - name: repo_credentials
+            - name: {{ .Values.artifactory }}
+        execution:
+          onStart:
+            - update_commit_status service2_repo --message "starting..." --context "$pipeline_name:$run_number"
+            - send_notification notifySlack --text "Starting $pipeline_name:$run_number" --recipient "#jfrog-pipeline-notification"
+          onExecute:
+            -  cd  $res_service2_repo_resourcePath
+            -  export LEIN_PASSWORD=$int_repo_credentials_password
+            -  export LEIN_USERNAME=$int_repo_credentials_username
+            -  export JFROG_CLI_BUILD_NAME=$pipeline_name && export JFROG_CLI_BUILD_NUMBER=$run_number
+            -  lein  deploy
+          onFailure:
+            - update_commit_status service2_repo --message "Failed!" --context "$pipeline_name:$run_number"
+            - send_notification notifySlack --text "Failed $pipeline_name:$run_number" --recipient "#jfrog-pipeline-notification"
+          onSuccess:
+            - update_commit_status service2_repo --message "Succeeded :-)" --context "$pipeline_name:$run_number"
+            - send_notification notifySlack --text "Succeeded $pipeline_name:$run_number" --recipient "#jfrog-pipeline-notification"
